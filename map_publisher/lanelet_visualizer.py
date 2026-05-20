@@ -1,0 +1,104 @@
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from visualization_msgs.msg import Marker, MarkerArray
+from geometry_msgs.msg import Point
+import lanelet2
+from lanelet2.io import load
+from lanelet2.projection import UtmProjector
+import os
+
+MAP_PATH = os.path.join(os.path.dirname(__file__), 'crossings_lanelet2map.osm')
+ORIGIN_LAT = 48.77106330244843
+ORIGIN_LON = 11.439444972723058
+
+class LaneletVisualizer(Node):
+    def __init__(self):
+        super().__init__('lanelet_visualizer')
+
+        qos_profile = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL
+        )
+
+        self.pub = self.create_publisher(MarkerArray, '/lanelet_map', qos_profile)
+
+        origin = lanelet2.io.Origin(ORIGIN_LAT, ORIGIN_LON)
+        projector = UtmProjector(origin)
+        self.map = load(MAP_PATH, projector)
+
+        lanelet_count = len(self.map.laneletLayer)
+        self.get_logger().info(f"Number of lanelets: {lanelet_count}")
+
+        if lanelet_count == 0:
+            self.get_logger().error("NO LANELETS FOUND!")
+            return
+
+        first_lanelet = next(iter(self.map.laneletLayer))
+        self.origin_x = first_lanelet.centerline[0].x
+        self.origin_y = first_lanelet.centerline[0].y
+        self.get_logger().info(f"MAP_OFFSET: x={self.origin_x:.4f}, y={self.origin_y:.4f}")
+
+        self.timer = self.create_timer(1.0, self.publish_map)
+
+    def publish_map(self):
+        marker_array = MarkerArray()
+
+        for i, lanelet in enumerate(self.map.laneletLayer):
+
+            center_marker = Marker()
+            center_marker.header.frame_id = "map"
+            center_marker.id = i
+            center_marker.type = Marker.LINE_STRIP
+            center_marker.scale.x = 0.2
+            center_marker.color.g = 1.0
+            center_marker.color.a = 1.0
+            for pt in lanelet.centerline:
+                p = Point()
+                p.x = pt.x - self.origin_x
+                p.y = pt.y - self.origin_y
+                p.z = 0.0
+                center_marker.points.append(p)
+            marker_array.markers.append(center_marker)
+
+            left_marker = Marker()
+            left_marker.header.frame_id = "map"
+            left_marker.id = i + 1000
+            left_marker.type = Marker.LINE_STRIP
+            left_marker.scale.x = 0.1
+            left_marker.color.r = 1.0
+            left_marker.color.a = 1.0
+            for pt in lanelet.leftBound:
+                p = Point()
+                p.x = pt.x - self.origin_x
+                p.y = pt.y - self.origin_y
+                p.z = 0.0
+                left_marker.points.append(p)
+            marker_array.markers.append(left_marker)
+
+            right_marker = Marker()
+            right_marker.header.frame_id = "map"
+            right_marker.id = i + 2000
+            right_marker.type = Marker.LINE_STRIP
+            right_marker.scale.x = 0.1
+            right_marker.color.b = 1.0
+            right_marker.color.a = 1.0
+            for pt in lanelet.rightBound:
+                p = Point()
+                p.x = pt.x - self.origin_x
+                p.y = pt.y - self.origin_y
+                p.z = 0.0
+                right_marker.points.append(p)
+            marker_array.markers.append(right_marker)
+
+        self.pub.publish(marker_array)
+        self.get_logger().info("Map published!")
+
+def main():
+    rclpy.init()
+    node = LaneletVisualizer()
+    rclpy.spin(node)
+
+if __name__ == '__main__':
+    main()
