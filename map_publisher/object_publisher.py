@@ -5,6 +5,8 @@ from visualization_msgs.msg import Marker, MarkerArray
 import json
 import math
 import os
+import numpy as np
+from filterpy.kalman import KalmanFilter
 
 OBJECT_LIST_PATH = os.path.join(os.path.dirname(__file__), '20241126_0017_crossing1_00.json')
 PLAYBACK_INTERVAL = 0.1
@@ -28,6 +30,39 @@ def yaw_to_quaternion(yaw):
     sy = math.sin(yaw * 0.5)
     return 0.0, 0.0, sy, cy
 
+def create_kalman_filter(dt=0.1):
+    """
+    Kalman filter for 2D position smoothing.
+    State: [x, y, vx, vy]
+    Measurement: [x, y]
+    """
+    kf = KalmanFilter(dim_x=4, dim_z=2)
+
+    # State transition matrix (constant velocity model)
+    kf.F = np.array([
+        [1, 0, dt, 0],
+        [0, 1, 0, dt],
+        [0, 0, 1,  0],
+        [0, 0, 0,  1]
+    ])
+
+    # Measurement matrix (we observe x, y only)
+    kf.H = np.array([
+        [1, 0, 0, 0],
+        [0, 1, 0, 0]
+    ])
+
+    # Measurement noise (how noisy is the sensor)
+    kf.R = np.eye(2) * 0.5
+
+    # Process noise (how much we trust the motion model)
+    kf.Q = np.eye(4) * 0.1
+
+    # Initial covariance
+    kf.P = np.eye(4) * 1.0
+
+    return kf
+
 class ObjectPublisher(Node):
     def __init__(self):
         super().__init__('object_publisher')
@@ -43,6 +78,7 @@ class ObjectPublisher(Node):
         data_path     = self.get_parameter('object_list_path').value
 
         self.get_logger().info(f"Offset: ({self.offset_x}, {self.offset_y})")
+        self.get_logger().info("Kalman filter enabled for position smoothing")
 
         qos = QoSProfile(
             depth=1,
@@ -76,16 +112,36 @@ class ObjectPublisher(Node):
                 'ts_index':     {ts: i for i, ts in enumerate(tr['timestamps'])},
                 'positions':    tr['positions'],
                 'orientations': tr['orientations'],
+                'kf':           None,  # Kalman filter (initialized on first use)
             }
 
         self.frame_idx = 0
         self.timer = self.create_timer(interval, self.publish_frame)
         self.get_logger().info("Object publisher ready → /object_markers")
 
+    def get_smoothed_position(self, td, pos):
+        """Apply Kalman filter to smooth position."""
+        if td['kf'] is None:
+            # Initialize filter with first position
+            td['kf'] = create_kalman_filter(dt=PLAYBACK_INTERVAL)
+            td['kf'].x = np.array([pos[0], pos[1], 0.0, 0.0])
+
+        # Predict next state
+        td['kf'].predict()
+
+        # Update with measurement
+        td['kf'].update(np.array([pos[0], pos[1]]))
+
+        # Return smoothed position
+        return float(td['kf'].x[0]), float(td['kf'].x[1])
+
     def publish_frame(self):
         if self.frame_idx >= len(self.timestamps):
             self.frame_idx = 0
             self.get_logger().info("Loop restart")
+            # Reset all Kalman filters on loop
+            for td in self.track_data.values():
+                td['kf'] = None
 
         current_ts = self.timestamps[self.frame_idx]
         now = self.get_clock().now().to_msg()
@@ -104,14 +160,18 @@ class ObjectPublisher(Node):
             dims   = td['all_dims'][fi] if fi < len(td['all_dims']) else td['base_dims']
             length, width, height = dims
 
-            rx = pos[0] - self.offset_x
-            ry = pos[1] - self.offset_y
+            # Apply Kalman filter for smooth position
+            sx, sy = self.get_smoothed_position(td, pos)
+
+            rx = sx - self.offset_x
+            ry = sy - self.offset_y
             rz = pos[2]
 
             obj_type = td['type']
             r, g, b  = OBJECT_COLORS.get(obj_type, (0.7, 0.7, 0.7))
             qx, qy, qz, qw = yaw_to_quaternion(yaw)
 
+            # Bounding box
             box = Marker()
             box.header.frame_id    = "map"
             box.header.stamp       = now
@@ -136,6 +196,7 @@ class ObjectPublisher(Node):
             box.lifetime.nanosec   = lifetime_ns
             marker_array.markers.append(box)
 
+            # Text label
             label = Marker()
             label.header.frame_id  = "map"
             label.header.stamp     = now
@@ -155,6 +216,7 @@ class ObjectPublisher(Node):
             label.lifetime.nanosec = lifetime_ns
             marker_array.markers.append(label)
 
+            # Direction arrow (vehicles only)
             if obj_type in ("Car", "Van", "Truck", "Trailer"):
                 arrow = Marker()
                 arrow.header.frame_id    = "map"
