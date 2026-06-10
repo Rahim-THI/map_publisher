@@ -1,3 +1,5 @@
+nano ~/ros2_ws/src/map_publisher/map_publisher/object_publisher.py
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -8,7 +10,7 @@ from lanelet2.io import load
 from lanelet2.projection import UtmProjector
 import os
 
-MAP_PATH = "/home/rahim/ros2_ws/src/map_publisher/map_publisher/crossings_lanelet2map.osm"
+MAP_PATH = os.path.join(os.path.dirname(__file__), 'crossings_lanelet2map.osm')
 ORIGIN_LAT = 48.77106330244843
 ORIGIN_LON = 11.439444972723058
 
